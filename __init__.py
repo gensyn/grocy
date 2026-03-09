@@ -332,39 +332,126 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
             "Failed to add recipe '%s' to calendar '%s'", display_name, calendar
         )
 
-    # Add each ingredient as a separate item in the todo list, skipping "Gewürze"
+    # Add each ingredient to the todo list, skipping "Gewürze".
+    # If an item for the same product+unit already exists, its amount is summed.
     recipe_id = recipe.get("id")
     if recipe_id is not None:
         try:
             ingredients = await sensor.async_get_recipe_ingredients(recipe_id)
+
+            # Step 1: Accumulate ingredients within this recipe by (product, unit)
+            # to handle the (unlikely but possible) case of duplicate entries.
+            accumulated: dict[tuple[str, str], Any] = {}
+            order: list[tuple[str, str]] = []
             for ingredient in ingredients:
                 if ingredient.get("skip"):
                     continue
                 product_name = ingredient["product_name"]
-                amount = ingredient.get("amount", "")
                 unit_name = ingredient.get("unit_name", "")
-                # Format amount as a clean number (strip unnecessary trailing zeros)
+                amount = ingredient.get("amount", "")
+                key = (product_name, unit_name)
+                if key not in accumulated:
+                    accumulated[key] = amount
+                    order.append(key)
+                else:
+                    try:
+                        accumulated[key] = float(accumulated[key]) + float(amount)
+                    except (ValueError, TypeError):
+                        pass  # Keep existing value when amounts are not numeric
+
+            # Step 2: Fetch current todo list items so we can merge when possible.
+            existing_items: list[dict] = []
+            try:
+                response = await hass.services.async_call(
+                    "todo",
+                    "get_items",
+                    {CONF_ENTITY_ID: todo_list},
+                    blocking=True,
+                    return_response=True,
+                )
+                existing_items = (response or {}).get(todo_list, {}).get("items", [])
+            except (ServiceValidationError, HomeAssistantError):
+                _LOGGER.warning(
+                    "Could not fetch existing todo items from '%s'; "
+                    "all ingredients will be added as new items",
+                    todo_list,
+                )
+
+            # Step 3: For each accumulated ingredient, update an existing item
+            # when one with the same product+unit is already present; otherwise add.
+            for key in order:
+                product_name, unit_name = key
+                amount = accumulated[key]
+
+                # Build a suffix that uniquely identifies this product+unit combo.
+                # Format: " {unit} {product}" (with unit) or " {product}" (no unit).
+                if unit_name.strip():
+                    item_suffix = f" {unit_name} {product_name}"
+                else:
+                    item_suffix = f" {product_name}"
+
+                # Format the amount for display.
+                amount_str = ""
                 if amount:
                     try:
                         amount_str = f"{float(amount):g}"
                     except (ValueError, TypeError):
                         amount_str = str(amount)
-                    item_name = (
-                        f"{amount_str} {unit_name} {product_name}"
-                        if unit_name.strip()
-                        else f"{amount_str} {product_name}"
+
+                item_name = (
+                    f"{amount_str}{item_suffix}" if amount_str else product_name
+                )
+
+                # Try to find a matching item in the existing list.
+                # A match requires the item's summary to end with item_suffix AND
+                # the leading part to be parseable as a number (to avoid partial-
+                # word false-positives and items without a numeric amount).
+                matched_summary: str | None = None
+                matched_old_amount: float | None = None
+                for existing in existing_items:
+                    summary = existing.get("summary", "")
+                    if not summary.endswith(item_suffix):
+                        continue
+                    prefix = summary[: -len(item_suffix)].strip()
+                    try:
+                        matched_old_amount = float(prefix)
+                        matched_summary = summary
+                        break
+                    except ValueError:
+                        continue  # Prefix not numeric → not a managed item
+
+                if matched_summary is not None and matched_old_amount is not None:
+                    # Merge the amounts and update the existing item.
+                    try:
+                        combined = matched_old_amount + float(amount_str)
+                        combined_str = (
+                            str(int(combined))
+                            if combined.is_integer()
+                            else f"{combined:g}"
+                        )
+                        new_item_name = f"{combined_str}{item_suffix}"
+                    except (ValueError, TypeError):
+                        new_item_name = item_name  # Fallback: use new value as-is
+                    await hass.services.async_call(
+                        "todo",
+                        "update_item",
+                        {
+                            CONF_ENTITY_ID: todo_list,
+                            "item": matched_summary,
+                            "rename": new_item_name,
+                        },
+                        blocking=True,
                     )
                 else:
-                    item_name = product_name
-                await hass.services.async_call(
-                    "todo",
-                    "add_item",
-                    {
-                        CONF_ENTITY_ID: todo_list,
-                        "item": item_name,
-                    },
-                    blocking=True,
-                )
+                    await hass.services.async_call(
+                        "todo",
+                        "add_item",
+                        {
+                            CONF_ENTITY_ID: todo_list,
+                            "item": item_name,
+                        },
+                        blocking=True,
+                    )
         except (ServiceValidationError, HomeAssistantError) as err:
             _LOGGER.error("Failed to add ingredients to todo list: %s", err)
     else:
