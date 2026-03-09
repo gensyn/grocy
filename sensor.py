@@ -21,6 +21,87 @@ from .const import DOMAIN, CONF_GROCY_URL, CONF_API_KEY
 
 LOGGER = logging.getLogger(__name__)
 
+# Mapping from Grocy quantity unit long names (German and English) to
+# their common abbreviations.  Both singular and plural forms are included.
+_UNIT_ABBREVIATIONS: dict[str, str] = {
+    # Mass – German
+    "Gramm": "g",
+    "Kilogramm": "kg",
+    "Milligramm": "mg",
+    # Mass – English
+    "gram": "g",
+    "grams": "g",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "milligram": "mg",
+    "milligrams": "mg",
+    "ounce": "oz",
+    "ounces": "oz",
+    "pound": "lb",
+    "pounds": "lb",
+    # Volume – German
+    "Liter": "l",
+    "Milliliter": "ml",
+    "Deziliter": "dl",
+    "Zentiliter": "cl",
+    "Esslöffel": "EL",
+    "Teelöffel": "TL",
+    "Tasse": "Tasse",
+    # Volume – English
+    "liter": "l",
+    "litre": "l",
+    "liters": "l",
+    "litres": "l",
+    "milliliter": "ml",
+    "millilitre": "ml",
+    "milliliters": "ml",
+    "millilitres": "ml",
+    "deciliter": "dl",
+    "decilitre": "dl",
+    "centiliter": "cl",
+    "centilitre": "cl",
+    "tablespoon": "tbsp",
+    "tablespoons": "tbsp",
+    "teaspoon": "tsp",
+    "teaspoons": "tsp",
+    "cup": "cup",
+    "cups": "cup",
+    "fluid ounce": "fl oz",
+    "fluid ounces": "fl oz",
+    # Piece / count – German
+    "Stück": "Stk",
+    "Stücke": "Stk",
+    "Scheibe": "Scheibe",
+    "Scheiben": "Scheiben",
+    "Packung": "Pkg",
+    "Packungen": "Pkg",
+    "Dose": "Dose",
+    "Dosen": "Dosen",
+    "Flasche": "Fl",
+    "Flaschen": "Fl",
+    "Bund": "Bd",
+    "Zehe": "Zehe",
+    "Zehen": "Zehen",
+    "Prise": "Pr",
+    "Prisen": "Pr",
+    # Piece / count – English
+    "piece": "pc",
+    "pieces": "pc",
+    "slice": "slice",
+    "slices": "slices",
+    "clove": "clove",
+    "cloves": "cloves",
+    "bunch": "bunch",
+    "can": "can",
+    "cans": "cans",
+    "bottle": "btl",
+    "bottles": "btl",
+    "package": "pkg",
+    "packages": "pkg",
+    "pinch": "pinch",
+    "pinches": "pinch",
+}
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -139,7 +220,8 @@ class GrocySensor(SensorEntity):
                 if qu_id not in qu_cache:
                     try:
                         qu = await self._api_get(f"objects/quantity_units/{qu_id}")
-                        qu_cache[qu_id] = qu.get("name", "")
+                        raw_name = qu.get("name", "")
+                        qu_cache[qu_id] = _UNIT_ABBREVIATIONS.get(raw_name, raw_name)
                     except Exception:  # noqa: BLE001
                         LOGGER.debug("Could not fetch quantity unit %s", qu_id)
                         qu_cache[qu_id] = ""
