@@ -1,0 +1,66 @@
+plan_meal:
+  name: Plan meal
+  description: >
+    Picks a random recipe from the Grocy instance, sends it as a suggestion via
+    the specified notify service, and allows the user to accept, dismiss or cancel.
+    Accepted recipes are added to the calendar and their ingredients are added to
+    the todo list.
+  fields:
+    entity_id:
+      name: Entity ID
+      description: The sensor entity of the Grocy integration entry to use.
+      required: true
+      selector:
+        entity:
+          domain: sensor
+    date:
+      name: Date
+      description: The date for which the meal should be planned.
+      required: true
+      selector:
+        date:
+    meal_type:
+      name: Meal type
+      description: >
+        Arbitrary string used as a filter. Only recipes whose name begins with
+        "[meal_type]" will be considered.
+      required: true
+      selector:
+        text:
+    calendar:
+      name: Calendar
+      description: >
+        The calendar entity to check for recent meals (blacklist) and to add the
+        accepted meal to.
+      required: true
+      selector:
+        entity:
+          domain: calendar
+    todo_list:
+      name: Todo list
+      description: >
+        The todo list entity to which the ingredients of the accepted recipe are
+        added.
+      required: true
+      selector:
+        entity:
+          domain: todo
+    notify:
+      name: Notify service
+      description: >
+        The notify service (e.g. notify.mobile_app_my_phone) to send the meal
+        suggestion to.
+      required: true
+      selector:
+        text:
+    blacklist:
+      name: Blacklist (days)
+      description: >
+        Number of days to look back in the calendar. Recipes that were already
+        planned within this period are excluded from suggestions.
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 365
+          unit_of_measurement: days
