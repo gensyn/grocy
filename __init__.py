@@ -35,9 +35,22 @@ _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 
+def _strip_meal_prefix(name: str, meal_type: str) -> str:
+    """Strip the leading '[meal_type]' prefix from a recipe name.
+
+    Any whitespace between the prefix and the recipe name is also removed,
+    so both '[Dinner] Pasta' and '[Dinner]Pasta' return 'Pasta'.
+    """
+    prefix = f"[{meal_type}]"
+    if name.startswith(prefix):
+        return name[len(prefix):].strip()
+    return name
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Grocy integration and register the plan_meal service."""
-    hass.data.setdefault(DOMAIN, {"sessions": {}})
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault("sessions", {})
 
     async def async_plan_meal(service_call: ServiceCall) -> None:
         """Execute the grocy.plan_meal service."""
@@ -75,7 +88,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_key="no_recipes_found",
             )
 
-        # Determine which recipe names are blacklisted from the calendar
+        # Determine which recipe display names are blacklisted from the calendar.
+        # Calendar entries are stored with the stripped name, so compare accordingly.
         blacklisted_names: set[str] = set()
         if blacklist > 0:
             try:
@@ -87,9 +101,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                     "Could not fetch calendar events for blacklist check: %s", err
                 )
 
-        # Filter out blacklisted recipes
+        # Filter out blacklisted recipes (compare using stripped display names)
         available = [
-            r for r in typed_recipes if r.get("name") not in blacklisted_names
+            r for r in typed_recipes
+            if _strip_meal_prefix(r.get("name", ""), meal_type) not in blacklisted_names
         ]
 
         if not available:
@@ -119,9 +134,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         session["recipe"] = random.choice(available)
         await _send_suggestion(hass, session_id)
 
-        # Register event listener for Android companion app notification actions
+        # Register event listener for Android companion app notification actions.
+        # A broad Exception catch is intentional here: if _handle_add or _handle_next
+        # raise an unexpected error, we want it logged with full traceback rather than
+        # silently swallowed by HA's event bus error handler.
         async def _action_listener(event: Any) -> None:
-            await _handle_notification_action(hass, session_id, event)
+            try:
+                await _handle_notification_action(hass, session_id, event)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception(
+                    "Unexpected error handling notification action for session %s",
+                    session_id,
+                )
 
         session["unsub"] = hass.bus.async_listen(
             "mobile_app_notification_action",
@@ -174,7 +198,11 @@ def _get_sensor(hass: HomeAssistant, entity_id: str) -> GrocySensor:
 async def _get_blacklisted_recipe_names(
     hass: HomeAssistant, calendar: str, blacklist_days: int
 ) -> set[str]:
-    """Return a set of recipe names that appear in the calendar within the last blacklist_days."""
+    """Return the set of event summaries from the calendar for the last blacklist_days.
+
+    Calendar entries are stored with the stripped recipe display name (meal type
+    prefix already removed), so callers should compare against stripped recipe names.
+    """
     now = dt_util.now()
     start_dt = now - timedelta(days=blacklist_days)
     try:
@@ -210,7 +238,11 @@ async def _send_suggestion(hass: HomeAssistant, session_id: str) -> None:
         return
 
     recipe = session["recipe"]
+    meal_type = session["meal_type"]
     notify = session["notify"]
+
+    # Strip [meal_type] prefix for display
+    display_name = _strip_meal_prefix(recipe.get("name", "Unknown recipe"), meal_type)
 
     # Accept both "notify.service_name" and plain "service_name" formats
     notify_service = notify.split(".", 1)[-1] if "." in notify else notify
@@ -221,7 +253,7 @@ async def _send_suggestion(hass: HomeAssistant, session_id: str) -> None:
             notify_service,
             {
                 "title": "Meal Suggestion",
-                "message": recipe.get("name", "Unknown recipe"),
+                "message": display_name,
                 "data": {
                     "tag": f"grocy_meal_{session_id}",
                     "actions": [
@@ -230,8 +262,8 @@ async def _send_suggestion(hass: HomeAssistant, session_id: str) -> None:
                             "title": "Add",
                         },
                         {
-                            "action": f"GROCY_DISMISS_{session_id}",
-                            "title": "Dismiss",
+                            "action": f"GROCY_NEXT_{session_id}",
+                            "title": "Next",
                         },
                         {
                             "action": f"GROCY_CANCEL_{session_id}",
@@ -255,8 +287,8 @@ async def _handle_notification_action(
 
     if action == f"GROCY_ADD_{session_id}":
         await _handle_add(hass, session_id)
-    elif action == f"GROCY_DISMISS_{session_id}":
-        await _handle_dismiss(hass, session_id)
+    elif action == f"GROCY_NEXT_{session_id}":
+        await _handle_next(hass, session_id)
     elif action == f"GROCY_CANCEL_{session_id}":
         _cleanup_session(hass, session_id)
 
@@ -265,24 +297,33 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
     """Accept the suggestion: add recipe to calendar and ingredients to todo list."""
     session = hass.data[DOMAIN]["sessions"].get(session_id)
     if not session:
+        _LOGGER.warning(
+            "Received 'Add' action but session %s no longer exists", session_id
+        )
         return
 
     recipe = session["recipe"]
+    meal_type = session["meal_type"]
     calendar = session["calendar"]
     todo_list = session["todo_list"]
     meal_date = session["meal_date"]
     sensor: GrocySensor = session["sensor"]
 
-    # Add the recipe to the calendar as an all-day event
+    # Use the stripped display name (without [meal_type] prefix) for the calendar entry
+    display_name = _strip_meal_prefix(recipe.get("name", ""), meal_type)
+
+    # Add the recipe to the calendar as an all-day event.
+    # end_date must be the day AFTER start_date (iCal exclusive-end convention).
+    end_date = meal_date + timedelta(days=1)
     try:
         await hass.services.async_call(
             "calendar",
             "create_event",
             {
                 CONF_ENTITY_ID: calendar,
-                "summary": recipe.get("name", ""),
+                "summary": display_name,
                 "start_date": str(meal_date),
-                "end_date": str(meal_date),
+                "end_date": str(end_date),
             },
             blocking=True,
         )
@@ -290,43 +331,51 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
         _LOGGER.error("Failed to add recipe to calendar: %s", err)
 
     # Add each ingredient as a separate item in the todo list
-    try:
-        ingredients = await sensor.async_get_recipe_ingredients(recipe["id"])
-        for ingredient in ingredients:
-            product_name = ingredient["product_name"]
-            amount = ingredient.get("amount", "")
-            item_name = f"{amount}x {product_name}" if amount else product_name
-            await hass.services.async_call(
-                "todo",
-                "add_item",
-                {
-                    CONF_ENTITY_ID: todo_list,
-                    "item": item_name,
-                },
-                blocking=True,
-            )
-    except (ServiceValidationError, HomeAssistantError) as err:
-        _LOGGER.error("Failed to add ingredients to todo list: %s", err)
+    recipe_id = recipe.get("id")
+    if recipe_id is not None:
+        try:
+            ingredients = await sensor.async_get_recipe_ingredients(recipe_id)
+            for ingredient in ingredients:
+                product_name = ingredient["product_name"]
+                amount = ingredient.get("amount", "")
+                item_name = f"{amount}x {product_name}" if amount else product_name
+                await hass.services.async_call(
+                    "todo",
+                    "add_item",
+                    {
+                        CONF_ENTITY_ID: todo_list,
+                        "item": item_name,
+                    },
+                    blocking=True,
+                )
+        except (ServiceValidationError, HomeAssistantError) as err:
+            _LOGGER.error("Failed to add ingredients to todo list: %s", err)
+    else:
+        _LOGGER.error(
+            "Recipe '%s' has no id field; cannot fetch ingredients", recipe.get("name")
+        )
 
     _cleanup_session(hass, session_id)
 
 
-async def _handle_dismiss(hass: HomeAssistant, session_id: str) -> None:
-    """Dismiss the current suggestion and send a new one from the remaining pool."""
+async def _handle_next(hass: HomeAssistant, session_id: str) -> None:
+    """Skip the current suggestion and send a new one from the remaining pool."""
     session = hass.data[DOMAIN]["sessions"].get(session_id)
     if not session:
         return
 
-    # Record the dismissed recipe so it is not suggested again
-    session["dismissed"].add(session["recipe"]["id"])
+    # Record the skipped recipe so it is not suggested again
+    current_id = session["recipe"].get("id")
+    if current_id is not None:
+        session["dismissed"].add(current_id)
 
     remaining = [
-        r for r in session["available"] if r["id"] not in session["dismissed"]
+        r for r in session["available"] if r.get("id") not in session["dismissed"]
     ]
 
     if not remaining:
         _LOGGER.info(
-            "No more recipes available for session %s after dismissal", session_id
+            "No more recipes available for session %s after skipping", session_id
         )
         _cleanup_session(hass, session_id)
         return
@@ -341,3 +390,4 @@ def _cleanup_session(hass: HomeAssistant, session_id: str) -> None:
     session = hass.data[DOMAIN]["sessions"].pop(session_id, None)
     if session and session.get("unsub"):
         session["unsub"]()
+

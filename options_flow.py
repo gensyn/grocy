@@ -15,15 +15,16 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def validate_grocy_connection(url: str, api_key: str) -> None:
-    """Validate the Grocy connection by calling the system info endpoint.
+    """Validate the Grocy connection by calling an authenticated endpoint.
 
+    Uses /api/user which always requires a valid GROCY-API-KEY.
     Raises ValueError with an error key on failure.
     """
     clean_url = url.rstrip("/")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f"{clean_url}/api/system/info",
+                f"{clean_url}/api/user",
                 headers={"GROCY-API-KEY": api_key},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
@@ -31,7 +32,9 @@ async def validate_grocy_connection(url: str, api_key: str) -> None:
                     raise ValueError("invalid_auth")
                 if resp.status != 200:
                     raise ValueError("cannot_connect")
-    except aiohttp.ClientError as err:
+    except ValueError:
+        raise
+    except (aiohttp.ClientError, TimeoutError) as err:
         _LOGGER.debug("Grocy connection error: %s", err)
         raise ValueError("cannot_connect") from err
 
