@@ -168,10 +168,15 @@ class GrocySensor(SensorEntity):
     ) -> list[dict]:
         """Get ingredients for a recipe with resolved product names and quantity units.
 
+        Grocy stores recipe position amounts in the product's stock quantity unit
+        (e.g. 20 g) while qu_id carries the recipe display unit (e.g. Esslöffel).
+        When the two differ, the factor from quantity_unit_conversions is used to
+        convert back to the recipe display amount (e.g. 20 g / 10 = 2 EL).
+
         Each returned dict contains:
         - product_name: str
-        - amount: the raw amount value from Grocy (float or empty string)
-        - unit_name: str – the resolved quantity unit name (may be empty)
+        - amount: display amount (converted to recipe QU when possible)
+        - unit_name: str – the resolved quantity unit abbreviation (may be empty)
         - skip: bool – True for ingredients in the 'Gewürze' product group
         """
         positions = await self._api_get(
@@ -182,18 +187,22 @@ class GrocySensor(SensorEntity):
         # Caches to avoid redundant API calls within the same request
         qu_cache: dict[int | str, str] = {}
         pg_cache: dict[int | str, str] = {}
+        # conv_cache key: (from_qu_id, to_qu_id, product_id) → factor | None
+        conv_cache: dict[tuple, float | None] = {}
 
         ingredients = []
         for pos in positions:
             product_name = str(pos.get("product_id", "Unknown"))
             skip = False
+            qu_id_stock: int | str | None = None
 
-            # Resolve product name and check product group
+            # Resolve product name, stock QU, and product group
             product_id = pos.get("product_id")
             if product_id is not None:
                 try:
                     product = await self._api_get(f"objects/products/{product_id}")
                     product_name = product.get("name", str(product_id))
+                    qu_id_stock = product.get("qu_id_stock")
 
                     product_group_id = product.get("product_group_id")
                     if product_group_id is not None:
@@ -213,7 +222,7 @@ class GrocySensor(SensorEntity):
                 except Exception:  # noqa: BLE001
                     LOGGER.debug("Could not fetch product %s", product_id)
 
-            # Resolve quantity unit name
+            # Resolve quantity unit name (recipe display QU)
             qu_id = pos.get("qu_id")
             unit_name = ""
             if qu_id is not None:
@@ -227,15 +236,90 @@ class GrocySensor(SensorEntity):
                         qu_cache[qu_id] = ""
                 unit_name = qu_cache.get(qu_id, "")
 
+            # Convert amount from stock QU back to recipe display QU when needed.
+            # Grocy stores amount in the product's stock QU; qu_id is the display QU.
+            raw_amount = pos.get("amount", "")
+            display_amount: float | str = raw_amount
+            if (
+                qu_id is not None
+                and qu_id_stock is not None
+                and qu_id != qu_id_stock
+                and raw_amount != ""
+            ):
+                factor = await self._get_qu_conversion_factor(
+                    qu_id, qu_id_stock, product_id, conv_cache
+                )
+                if factor is None:
+                    # Try reverse direction: from_qu=stock, to_qu=recipe
+                    factor_rev = await self._get_qu_conversion_factor(
+                        qu_id_stock, qu_id, product_id, conv_cache
+                    )
+                    if factor_rev is not None and factor_rev != 0:
+                        try:
+                            display_amount = float(raw_amount) * factor_rev
+                        except (ValueError, TypeError):
+                            pass
+                elif factor is not None and factor != 0:
+                    try:
+                        display_amount = float(raw_amount) / factor
+                    except (ValueError, TypeError):
+                        pass
+
+            # Format numeric amounts: drop the decimal when it is .0
+            if isinstance(display_amount, float) and display_amount == int(display_amount):
+                display_amount = int(display_amount)
+
             ingredients.append(
                 {
                     "product_name": product_name,
-                    "amount": pos.get("amount", ""),
+                    "amount": display_amount,
                     "unit_name": unit_name,
                     "skip": skip,
                 }
             )
         return ingredients
+
+    async def _get_qu_conversion_factor(
+        self,
+        from_qu_id: int | str,
+        to_qu_id: int | str,
+        product_id: int | str | None,
+        cache: dict[tuple, float | None],
+    ) -> float | None:
+        """Return the Grocy QU conversion factor for from_qu → to_qu.
+
+        Grocy semantics: 1 unit of from_qu = factor units of to_qu.
+        Product-specific conversions are tried first; generic ones are used as
+        a fallback.  Returns None when no matching conversion is found.
+        """
+        cache_key = (from_qu_id, to_qu_id, product_id)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        pids = [product_id, None] if product_id is not None else [None]
+        for pid in pids:
+            query_filters = [f"from_qu_id={from_qu_id}", f"to_qu_id={to_qu_id}"]
+            if pid is not None:
+                query_filters.append(f"product_id={pid}")
+            try:
+                conversions = await self._api_get(
+                    "objects/quantity_unit_conversions",
+                    params={"query[]": query_filters},
+                )
+                if conversions:
+                    factor = float(conversions[0].get("factor", 1))
+                    cache[cache_key] = factor
+                    return factor
+            except Exception:  # noqa: BLE001
+                LOGGER.debug(
+                    "Could not fetch QU conversion %s→%s (product %s)",
+                    from_qu_id,
+                    to_qu_id,
+                    pid,
+                )
+
+        cache[cache_key] = None
+        return None
 
     async def _api_get(
         self, endpoint: str, params: dict | None = None
