@@ -85,25 +85,72 @@ class GrocySensor(SensorEntity):
     async def async_get_recipe_ingredients(
         self, recipe_id: str | int
     ) -> list[dict]:
-        """Get ingredients for a recipe with their resolved product names."""
+        """Get ingredients for a recipe with resolved product names and quantity units.
+
+        Each returned dict contains:
+        - product_name: str
+        - amount: the raw amount value from Grocy (float or empty string)
+        - unit_name: str – the resolved quantity unit name (may be empty)
+        - skip: bool – True for ingredients in the 'Gewürze' product group
+        """
         positions = await self._api_get(
             "objects/recipes_pos",
             params={"query[]": f"recipe_id={recipe_id}"},
         )
+
+        # Caches to avoid redundant API calls within the same request
+        qu_cache: dict[int | str, str] = {}
+        pg_cache: dict[int | str, str] = {}
+
         ingredients = []
         for pos in positions:
-            try:
-                product = await self._api_get(
-                    f"objects/products/{pos['product_id']}"
-                )
-                product_name = product.get("name", str(pos["product_id"]))
-            except Exception:
-                product_name = str(pos.get("product_id", "Unknown"))
+            product_name = str(pos.get("product_id", "Unknown"))
+            skip = False
+
+            # Resolve product name and check product group
+            product_id = pos.get("product_id")
+            if product_id is not None:
+                try:
+                    product = await self._api_get(f"objects/products/{product_id}")
+                    product_name = product.get("name", str(product_id))
+
+                    product_group_id = product.get("product_group_id")
+                    if product_group_id is not None:
+                        if product_group_id not in pg_cache:
+                            try:
+                                pg = await self._api_get(
+                                    f"objects/product_groups/{product_group_id}"
+                                )
+                                pg_cache[product_group_id] = pg.get("name", "")
+                            except Exception:  # noqa: BLE001
+                                LOGGER.debug(
+                                    "Could not fetch product group %s", product_group_id
+                                )
+                                pg_cache[product_group_id] = ""
+                        if pg_cache.get(product_group_id) == "Gewürze":
+                            skip = True
+                except Exception:  # noqa: BLE001
+                    LOGGER.debug("Could not fetch product %s", product_id)
+
+            # Resolve quantity unit name
+            qu_id = pos.get("qu_id")
+            unit_name = ""
+            if qu_id is not None:
+                if qu_id not in qu_cache:
+                    try:
+                        qu = await self._api_get(f"objects/quantity_units/{qu_id}")
+                        qu_cache[qu_id] = qu.get("name", "")
+                    except Exception:  # noqa: BLE001
+                        LOGGER.debug("Could not fetch quantity unit %s", qu_id)
+                        qu_cache[qu_id] = ""
+                unit_name = qu_cache.get(qu_id, "")
+
             ingredients.append(
                 {
                     "product_name": product_name,
                     "amount": pos.get("amount", ""),
-                    "qu_id": pos.get("qu_id", ""),
+                    "unit_name": unit_name,
+                    "skip": skip,
                 }
             )
         return ingredients

@@ -327,18 +327,35 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
             },
             blocking=True,
         )
-    except (ServiceValidationError, HomeAssistantError) as err:
-        _LOGGER.error("Failed to add recipe to calendar: %s", err)
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception(
+            "Failed to add recipe '%s' to calendar '%s'", display_name, calendar
+        )
 
-    # Add each ingredient as a separate item in the todo list
+    # Add each ingredient as a separate item in the todo list, skipping "Gewürze"
     recipe_id = recipe.get("id")
     if recipe_id is not None:
         try:
             ingredients = await sensor.async_get_recipe_ingredients(recipe_id)
             for ingredient in ingredients:
+                if ingredient.get("skip"):
+                    continue
                 product_name = ingredient["product_name"]
                 amount = ingredient.get("amount", "")
-                item_name = f"{amount}x {product_name}" if amount else product_name
+                unit_name = ingredient.get("unit_name", "")
+                # Format amount as a clean number (strip unnecessary trailing zeros)
+                if amount:
+                    try:
+                        amount_str = f"{float(amount):g}"
+                    except (ValueError, TypeError):
+                        amount_str = str(amount)
+                    item_name = (
+                        f"{amount_str} {unit_name} {product_name}"
+                        if unit_name.strip()
+                        else f"{amount_str} {product_name}"
+                    )
+                else:
+                    item_name = product_name
                 await hass.services.async_call(
                     "todo",
                     "add_item",
