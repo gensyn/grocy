@@ -89,6 +89,46 @@
                     "description": "Recipes already planned within this many days are excluded from suggestions."
                 }
             }
+        },
+        "add_meal": {
+            "name": "Add meal",
+            "description": "Pins a specific recipe to a date by adding it directly to the calendar and adding its ingredients to the todo list — no notification or suggestion flow is involved.",
+            "fields": {
+                "entity_id": {
+                    "name": "Entity ID",
+                    "description": "The sensor entity of the Grocy integration entry to use."
+                },
+                "date": {
+                    "name": "Date",
+                    "description": "The date for which the meal should be planned."
+                },
+                "recipe": {
+                    "name": "Recipe name",
+                    "description": "The name of the recipe as it appears in Grocy. Case-insensitive; the \"[meal_type]\" prefix is optional."
+                },
+                "calendar": {
+                    "name": "Calendar",
+                    "description": "The calendar entity to add the meal event to."
+                },
+                "todo_list": {
+                    "name": "Todo list",
+                    "description": "The todo list entity to which the ingredients of the recipe are added."
+                }
+            }
+        },
+        "check_missing_products": {
+            "name": "Check missing products",
+            "description": "Checks all products in the Grocy instance against their configured minimum stock amounts and adds missing quantities to a todo list.",
+            "fields": {
+                "entity_id": {
+                    "name": "Entity ID",
+                    "description": "The sensor entity of the Grocy integration entry to use."
+                },
+                "todo_list": {
+                    "name": "Todo list",
+                    "description": "The todo list entity to which the missing product amounts are added."
+                }
+            }
         }
     }
 }

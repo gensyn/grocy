@@ -1,0 +1,134 @@
+{
+    "config": {
+        "abort": {
+            "already_configured": "Gerät ist bereits konfiguriert"
+        },
+        "error": {
+            "cannot_connect": "Verbindung zur Grocy-Instanz fehlgeschlagen. Bitte URL prüfen.",
+            "invalid_auth": "Ungültiger API-Schlüssel. Bitte den Grocy-API-Schlüssel prüfen.",
+            "unknown": "Unerwarteter Fehler"
+        },
+        "step": {
+            "user": {
+                "title": "Grocy",
+                "description": "Verbindung zu einer Grocy-Instanz herstellen.",
+                "data": {
+                    "name": "Name",
+                    "grocy_url": "Grocy-URL",
+                    "api_key": "API-Schlüssel"
+                },
+                "data_description": {
+                    "name": "Ein Name zur Identifikation dieser Grocy-Instanz.",
+                    "grocy_url": "Die Basis-URL der Grocy-Instanz (z. B. https://grocy.beispiel.de).",
+                    "api_key": "Der API-Schlüssel aus dem Grocy-Profilbereich."
+                }
+            }
+        }
+    },
+    "options": {
+        "error": {
+            "cannot_connect": "Verbindung zur Grocy-Instanz fehlgeschlagen. Bitte URL prüfen.",
+            "invalid_auth": "Ungültiger API-Schlüssel. Bitte den Grocy-API-Schlüssel prüfen.",
+            "unknown": "Unerwarteter Fehler"
+        },
+        "step": {
+            "init": {
+                "title": "Grocy",
+                "description": "Verbindungseinstellungen für diese Grocy-Instanz aktualisieren.",
+                "data": {
+                    "grocy_url": "Grocy-URL",
+                    "api_key": "API-Schlüssel"
+                },
+                "data_description": {
+                    "grocy_url": "Die Basis-URL der Grocy-Instanz (z. B. https://grocy.beispiel.de).",
+                    "api_key": "Der API-Schlüssel aus dem Grocy-Profilbereich."
+                }
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "grocy": {
+                "state": {
+                    "connected": "Verbunden"
+                }
+            }
+        }
+    },
+    "services": {
+        "plan_meal": {
+            "name": "Mahlzeit planen",
+            "description": "Wählt ein zufälliges Rezept aus Grocy aus und sendet es als Vorschlag über einen Benachrichtigungsdienst.",
+            "fields": {
+                "entity_id": {
+                    "name": "Entitäts-ID",
+                    "description": "Die Sensor-Entität des zu verwendenden Grocy-Integrationseintrags."
+                },
+                "date": {
+                    "name": "Datum",
+                    "description": "Das Datum, für das die Mahlzeit geplant werden soll."
+                },
+                "meal_type": {
+                    "name": "Mahlzeitentyp",
+                    "description": "Nur Rezepte, deren Name mit \"[Mahlzeitentyp]\" beginnt, werden berücksichtigt."
+                },
+                "calendar": {
+                    "name": "Kalender",
+                    "description": "Kalender zur Überprüfung kürzlich geplanter Mahlzeiten (Sperrliste) und zum Eintragen akzeptierter Rezepte."
+                },
+                "todo_list": {
+                    "name": "Aufgabenliste",
+                    "description": "Aufgabenliste, in die die Zutaten des akzeptierten Rezepts eingetragen werden."
+                },
+                "notify": {
+                    "name": "Benachrichtigungsdienst",
+                    "description": "Benachrichtigungsdienst (z. B. notify.mobile_app_mein_handy) zum Versenden von Vorschlägen."
+                },
+                "blacklist": {
+                    "name": "Sperrliste (Tage)",
+                    "description": "Rezepte, die innerhalb dieser Anzahl von Tagen bereits geplant wurden, werden von Vorschlägen ausgeschlossen."
+                }
+            }
+        },
+        "add_meal": {
+            "name": "Mahlzeit hinzufügen",
+            "description": "Fügt ein bestimmtes Rezept direkt zum Kalender hinzu und trägt dessen Zutaten in die Aufgabenliste ein – ohne Benachrichtigungs- oder Vorschlagsablauf.",
+            "fields": {
+                "entity_id": {
+                    "name": "Entitäts-ID",
+                    "description": "Die Sensor-Entität des zu verwendenden Grocy-Integrationseintrags."
+                },
+                "date": {
+                    "name": "Datum",
+                    "description": "Das Datum, für das die Mahlzeit geplant werden soll."
+                },
+                "recipe": {
+                    "name": "Rezeptname",
+                    "description": "Der Name des Rezepts, wie er in Grocy erscheint. Die Suche unterscheidet nicht zwischen Groß- und Kleinschreibung; das Präfix \"[Mahlzeitentyp]\" wird ignoriert."
+                },
+                "calendar": {
+                    "name": "Kalender",
+                    "description": "Die Kalender-Entität, in die der Mahlzeiteintrag eingetragen wird."
+                },
+                "todo_list": {
+                    "name": "Aufgabenliste",
+                    "description": "Die Aufgabenlisten-Entität, in die die Zutaten des Rezepts eingetragen werden."
+                }
+            }
+        },
+        "check_missing_products": {
+            "name": "Fehlende Produkte prüfen",
+            "description": "Prüft alle Produkte in der Grocy-Instanz auf den konfigurierten Mindestbestand. Für jedes Produkt, dessen aktueller Bestand unter dem Minimum liegt, wird die fehlende Menge in die angegebene Aufgabenliste eingetragen.",
+            "fields": {
+                "entity_id": {
+                    "name": "Entitäts-ID",
+                    "description": "Die Sensor-Entität des zu verwendenden Grocy-Integrationseintrags."
+                },
+                "todo_list": {
+                    "name": "Aufgabenliste",
+                    "description": "Die Aufgabenlisten-Entität, in die die fehlenden Produktmengen eingetragen werden."
+                }
+            }
+        }
+    }
+}
