@@ -23,6 +23,8 @@ from .const import (
     SERVICE_PLAN_MEAL_SCHEMA,
     SERVICE_ADD_MEAL,
     SERVICE_ADD_MEAL_SCHEMA,
+    SERVICE_CHECK_MISSING_PRODUCTS,
+    SERVICE_CHECK_MISSING_PRODUCTS_SCHEMA,
     CONF_DATE,
     CONF_MEAL_TYPE,
     CONF_CALENDAR,
@@ -31,7 +33,7 @@ from .const import (
     CONF_BLACKLIST,
     CONF_RECIPE,
 )
-from .sensor import GrocySensor
+from .sensor import GrocySensor, _UNIT_ABBREVIATIONS
 
 _PLATFORMS: list[Platform] = [Platform.SENSOR]
 _LOGGER = logging.getLogger(__name__)
@@ -235,6 +237,149 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_ADD_MEAL,
         async_add_meal,
         schema=SERVICE_ADD_MEAL_SCHEMA,
+    )
+
+    async def async_check_missing_products(service_call: ServiceCall) -> None:
+        """Execute the grocy.check_missing_products service.
+
+        Iterates over all products in the Grocy instance and finds those whose
+        current stock amount is below their configured minimum stock amount.
+        For each such product the missing amount (min − current) is added to
+        the specified todo list using the same merge logic as the meal planning
+        services: the product name is the item summary and the amount + unit
+        are written to the description field.
+        """
+        entity_id = service_call.data[CONF_ENTITY_ID]
+        todo_list = service_call.data[CONF_TODO_LIST]
+
+        sensor = _get_sensor(hass, entity_id)
+
+        # --- Fetch products and current stock ---
+        try:
+            products = await sensor.async_get_products()
+        except HomeAssistantError as err:
+            raise ServiceValidationError(
+                f"Failed to load products from Grocy: {err}",
+                translation_domain=DOMAIN,
+                translation_key="grocy_api_error",
+            ) from err
+
+        try:
+            stock_entries = await sensor.async_get_stock()
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "Could not fetch stock from Grocy (treating all stock as 0): %s", err
+            )
+            stock_entries = []
+
+        # Build a lookup: product_id (str) → current stock amount (float)
+        stock_by_product: dict[str, float] = {}
+        for entry in stock_entries:
+            pid = str(entry.get("product_id", ""))
+            if pid:
+                try:
+                    stock_by_product[pid] = float(entry.get("amount", 0))
+                except (ValueError, TypeError):
+                    stock_by_product[pid] = 0.0
+
+        # --- Identify products below minimum stock ---
+        # Cache for quantity unit names (qu_id_stock → abbreviation)
+        qu_cache: dict[str, str] = {}
+
+        missing_items: list[dict] = []  # [{product_name, missing_amount, unit_name}]
+        for product in products:
+            min_amount_raw = product.get("min_stock_amount")
+            if min_amount_raw is None:
+                continue
+            try:
+                min_amount = float(min_amount_raw)
+            except (ValueError, TypeError):
+                continue
+            if min_amount <= 0:
+                continue
+
+            pid = str(product.get("id", ""))
+            current = stock_by_product.get(pid, 0.0)
+            if current >= min_amount:
+                continue
+
+            missing = min_amount - current
+
+            # Resolve the stock quantity unit name
+            qu_id_stock = product.get("qu_id_stock")
+            unit_name = ""
+            if qu_id_stock is not None:
+                qu_key = str(qu_id_stock)
+                if qu_key not in qu_cache:
+                    try:
+                        qu = await sensor.async_get_quantity_unit(qu_id_stock)
+                        raw_name = qu.get("name", "")
+                        qu_cache[qu_key] = _UNIT_ABBREVIATIONS.get(raw_name, raw_name)
+                    except HomeAssistantError:
+                        _LOGGER.debug(
+                            "Could not fetch quantity unit %s", qu_id_stock
+                        )
+                        qu_cache[qu_key] = ""
+                unit_name = qu_cache[qu_key]
+
+            product_name = product.get("name", f"Product {pid}")
+            # Format the missing amount, dropping trailing .0 for whole numbers
+            missing_str = (
+                str(int(missing)) if missing == int(missing) else f"{missing:g}"
+            )
+            missing_items.append(
+                {
+                    "product_name": product_name,
+                    "missing_str": missing_str,
+                    "unit_name": unit_name,
+                }
+            )
+
+        if not missing_items:
+            _LOGGER.info(
+                "grocy.check_missing_products: all products are sufficiently stocked"
+            )
+            return
+
+        # --- Write missing items to the todo list using the shared merge logic ---
+        existing_items: list[dict] = []
+        try:
+            response = await hass.services.async_call(
+                "todo",
+                "get_items",
+                {CONF_ENTITY_ID: todo_list},
+                blocking=True,
+                return_response=True,
+            )
+            existing_items = (response or {}).get(todo_list, {}).get("items", [])
+        except (ServiceValidationError, HomeAssistantError):
+            _LOGGER.warning(
+                "Could not fetch existing todo items from '%s'; "
+                "all missing products will be added as new items",
+                todo_list,
+            )
+
+        for item in missing_items:
+            try:
+                await _write_ingredient_to_todo(
+                    hass,
+                    todo_list,
+                    item["product_name"],
+                    item["missing_str"],
+                    item["unit_name"],
+                    existing_items,
+                )
+            except (ServiceValidationError, HomeAssistantError):
+                _LOGGER.exception(
+                    "Failed to add missing product '%s' to todo list",
+                    item["product_name"],
+                )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CHECK_MISSING_PRODUCTS,
+        async_check_missing_products,
+        schema=SERVICE_CHECK_MISSING_PRODUCTS_SCHEMA,
     )
 
     return True
@@ -484,10 +629,8 @@ async def _add_recipe_to_lists(
                     todo_list,
                 )
 
-            # Step 3: For each accumulated ingredient, update an existing item
-            # when one with the same product name is already present; otherwise add.
-            # Item name  = product name (plain)
-            # Description = "{amount} {unit}" or just "{amount}" when there is no unit
+            # Step 3: For each accumulated ingredient write it to the todo list,
+            # merging with an existing same-product+unit item when possible.
             for key in order:
                 product_name, unit_name = key
                 amount = accumulated[key]
@@ -500,79 +643,9 @@ async def _add_recipe_to_lists(
                     except (ValueError, TypeError):
                         amount_str = str(amount)
 
-                # Build the canonical description (amount + unit).
-                if amount_str and unit_name.strip():
-                    description = f"{amount_str} {unit_name}"
-                elif amount_str:
-                    description = amount_str
-                else:
-                    description = ""
-
-                # Try to find a matching item in the existing list.
-                # A match is an item whose summary equals the product name (after
-                # normalizing whitespace/casing) and whose description is parseable
-                # as "{float} [unit]" with the same unit (to avoid merging across
-                # different units).
-                matched_summary: str | None = None
-                matched_old_amount: float | None = None
-                product_name_normalized = product_name.strip().casefold()
-                for existing in existing_items:
-                    # Skip completed items — they should not be merged with.
-                    if existing.get("status") == "completed":
-                        continue
-                    summary = existing.get("summary", "")
-                    if summary.strip().casefold() != product_name_normalized:
-                        continue
-                    existing_desc = (existing.get("description") or "").strip()
-                    desc_parts = existing_desc.split(None, 1)
-                    if not desc_parts:
-                        continue
-                    try:
-                        existing_amount = float(desc_parts[0])
-                    except ValueError:
-                        continue
-                    existing_unit = desc_parts[1].strip() if len(desc_parts) > 1 else ""
-                    if existing_unit.casefold() == unit_name.strip().casefold():
-                        matched_old_amount = existing_amount
-                        matched_summary = summary
-                        break
-
-                if matched_summary is not None and matched_old_amount is not None:
-                    # Merge the amounts and update the existing item's description.
-                    try:
-                        combined = matched_old_amount + float(amount_str)
-                        combined_str = (
-                            str(int(combined))
-                            if combined.is_integer()
-                            else f"{combined:g}"
-                        )
-                        if unit_name.strip():
-                            new_description = f"{combined_str} {unit_name}"
-                        else:
-                            new_description = combined_str
-                    except (ValueError, TypeError):
-                        new_description = description  # Fallback: use new value as-is
-                    await hass.services.async_call(
-                        "todo",
-                        "update_item",
-                        {
-                            CONF_ENTITY_ID: todo_list,
-                            "item": matched_summary,
-                            "description": new_description,
-                        },
-                        blocking=True,
-                    )
-                else:
-                    await hass.services.async_call(
-                        "todo",
-                        "add_item",
-                        {
-                            CONF_ENTITY_ID: todo_list,
-                            "item": product_name,
-                            "description": description,
-                        },
-                        blocking=True,
-                    )
+                await _write_ingredient_to_todo(
+                    hass, todo_list, product_name, amount_str, unit_name, existing_items
+                )
         except (ServiceValidationError, HomeAssistantError) as err:
             _LOGGER.error("Failed to add ingredients to todo list: %s", err)
     else:
@@ -580,8 +653,98 @@ async def _add_recipe_to_lists(
             "Recipe '%s' has no id field; cannot fetch ingredients", recipe.get("name")
         )
 
-    # Advance to the next free calendar day and continue suggesting.
-    await _advance_to_next_free_day(hass, session_id)
+
+async def _write_ingredient_to_todo(
+    hass: HomeAssistant,
+    todo_list: str,
+    product_name: str,
+    amount_str: str,
+    unit_name: str,
+    existing_items: list[dict],
+) -> None:
+    """Write one ingredient to the todo list, merging with an existing item when possible.
+
+    The todo item summary is the product name.  The description holds
+    ``"{amount} {unit}"`` (or just ``"{amount}"`` when there is no unit).
+
+    Matching rules:
+    - Case-insensitive, whitespace-normalised comparison of the summary.
+    - The existing item's description must start with a float and have the same
+      unit (after stripping); if not, a new item is added rather than merging.
+    - Completed items are never merged with.
+
+    ``existing_items`` is the list already fetched by the caller.  This avoids
+    re-fetching on every call; callers that mutate the list in-place will see
+    the updates reflected in subsequent calls within the same batch.
+    """
+    # Build the canonical description (amount + unit).
+    if amount_str and unit_name.strip():
+        description = f"{amount_str} {unit_name}"
+    elif amount_str:
+        description = amount_str
+    else:
+        description = ""
+
+    matched_summary: str | None = None
+    matched_old_amount: float | None = None
+    product_name_normalized = product_name.strip().casefold()
+
+    for existing in existing_items:
+        # Skip completed items — they should not be merged with.
+        if existing.get("status") == "completed":
+            continue
+        summary = existing.get("summary", "")
+        if summary.strip().casefold() != product_name_normalized:
+            continue
+        existing_desc = (existing.get("description") or "").strip()
+        desc_parts = existing_desc.split(None, 1)
+        if not desc_parts:
+            continue
+        try:
+            existing_amount = float(desc_parts[0])
+        except ValueError:
+            continue
+        existing_unit = desc_parts[1].strip() if len(desc_parts) > 1 else ""
+        if existing_unit.casefold() == unit_name.strip().casefold():
+            matched_old_amount = existing_amount
+            matched_summary = summary
+            break
+
+    if matched_summary is not None and matched_old_amount is not None:
+        # Merge the amounts and update the existing item's description.
+        try:
+            combined = matched_old_amount + float(amount_str)
+            combined_str = (
+                str(int(combined))
+                if combined.is_integer()
+                else f"{combined:g}"
+            )
+            new_description = (
+                f"{combined_str} {unit_name}" if unit_name.strip() else combined_str
+            )
+        except (ValueError, TypeError):
+            new_description = description  # Fallback: use new value as-is
+        await hass.services.async_call(
+            "todo",
+            "update_item",
+            {
+                CONF_ENTITY_ID: todo_list,
+                "item": matched_summary,
+                "description": new_description,
+            },
+            blocking=True,
+        )
+    else:
+        await hass.services.async_call(
+            "todo",
+            "add_item",
+            {
+                CONF_ENTITY_ID: todo_list,
+                "item": product_name,
+                "description": description,
+            },
+            blocking=True,
+        )
 
 
 async def _handle_next(hass: HomeAssistant, session_id: str) -> None:

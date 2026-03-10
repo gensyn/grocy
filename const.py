@@ -18,6 +18,7 @@ CONF_RECIPE = "recipe"
 
 SERVICE_PLAN_MEAL = "plan_meal"
 SERVICE_ADD_MEAL = "add_meal"
+SERVICE_CHECK_MISSING_PRODUCTS = "check_missing_products"
 
 SERVICE_PLAN_MEAL_SCHEMA = vol.Schema(
     {
@@ -37,6 +38,13 @@ SERVICE_ADD_MEAL_SCHEMA = vol.Schema(
         vol.Required(CONF_DATE): cv.date,
         vol.Required(CONF_RECIPE): str,
         vol.Required(CONF_CALENDAR): cv.entity_id,
+        vol.Required(CONF_TODO_LIST): cv.entity_id,
+    }
+)
+
+SERVICE_CHECK_MISSING_PRODUCTS_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_ENTITY_ID): cv.entity_id,
         vol.Required(CONF_TODO_LIST): cv.entity_id,
     }
 )

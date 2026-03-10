@@ -163,6 +163,23 @@ class GrocySensor(SensorEntity):
         """Get all recipes from the Grocy instance."""
         return await self._api_get("objects/recipes")
 
+    async def async_get_products(self) -> list[dict]:
+        """Get all products from the Grocy instance."""
+        return await self._api_get("objects/products")
+
+    async def async_get_stock(self) -> list[dict]:
+        """Get the current stock overview from the Grocy instance.
+
+        Returns a list of stock entries.  Each entry contains at least
+        ``product_id`` and ``amount``.  Products with no stock entries at all
+        will be absent from this list.
+        """
+        return await self._api_get("stock")
+
+    async def async_get_quantity_unit(self, qu_id: int | str) -> dict:
+        """Get a single quantity unit object by its ID."""
+        return await self._api_get(f"objects/quantity_units/{qu_id}")
+
     async def async_get_recipe_ingredients(
         self, recipe_id: str | int
     ) -> list[dict]:
