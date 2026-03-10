@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import random
 import uuid
 from datetime import date, datetime, timedelta
@@ -20,12 +21,15 @@ from .const import (
     DOMAIN,
     SERVICE_PLAN_MEAL,
     SERVICE_PLAN_MEAL_SCHEMA,
+    SERVICE_ADD_MEAL,
+    SERVICE_ADD_MEAL_SCHEMA,
     CONF_DATE,
     CONF_MEAL_TYPE,
     CONF_CALENDAR,
     CONF_TODO_LIST,
     CONF_NOTIFY,
     CONF_BLACKLIST,
+    CONF_RECIPE,
 )
 from .sensor import GrocySensor
 
@@ -159,6 +163,78 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_PLAN_MEAL,
         async_plan_meal,
         schema=SERVICE_PLAN_MEAL_SCHEMA,
+    )
+
+    async def async_add_meal(service_call: ServiceCall) -> None:
+        """Execute the grocy.add_meal service.
+
+        Looks up the recipe by name (case-insensitive, stripped of any
+        [meal_type] prefix), then immediately adds it to the calendar and
+        the ingredients to the todo list — no notification required.
+        """
+        entity_id = service_call.data[CONF_ENTITY_ID]
+        meal_date = service_call.data[CONF_DATE]
+        recipe_name = service_call.data[CONF_RECIPE].strip()
+        calendar = service_call.data[CONF_CALENDAR]
+        todo_list = service_call.data[CONF_TODO_LIST]
+
+        sensor = _get_sensor(hass, entity_id)
+
+        try:
+            all_recipes = await sensor.async_get_recipes()
+        except HomeAssistantError as err:
+            raise ServiceValidationError(
+                f"Failed to load recipes from Grocy: {err}",
+                translation_domain=DOMAIN,
+                translation_key="grocy_api_error",
+            ) from err
+
+        # Find the recipe by name.  Try an exact match first; fall back to a
+        # case-insensitive comparison with the prefix stripped.
+        _prefix_re = re.compile(r"^\[[^\]]*\]\s*")
+        recipe_name_cf = recipe_name.casefold()
+        matched_recipe = None
+        for r in all_recipes:
+            r_name = r.get("name", "")
+            if r_name.casefold() == recipe_name_cf:
+                matched_recipe = r
+                break
+        if matched_recipe is None:
+            # Try matching against the stripped name (ignores "[meal_type]" prefix)
+            for r in all_recipes:
+                r_stripped = _prefix_re.sub("", r.get("name", "")).strip()
+                if r_stripped.casefold() == recipe_name_cf:
+                    matched_recipe = r
+                    break
+
+        if matched_recipe is None:
+            raise ServiceValidationError(
+                f"No recipe named '{recipe_name}' found in Grocy.",
+                translation_domain=DOMAIN,
+                translation_key="recipe_not_found",
+            )
+
+        # Use the stripped display name for calendar entry (remove any prefix).
+        display_name = (
+            _prefix_re.sub("", matched_recipe.get("name", "")).strip()
+            or matched_recipe.get("name", recipe_name)
+        )
+
+        try:
+            await _add_recipe_to_lists(
+                hass, sensor, matched_recipe, display_name, meal_date, calendar, todo_list
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "Unexpected error in grocy.add_meal for recipe '%s'", display_name
+            )
+            raise
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ADD_MEAL,
+        async_add_meal,
+        schema=SERVICE_ADD_MEAL_SCHEMA,
     )
 
     return True
@@ -322,8 +398,28 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
     # Use the stripped display name (without [meal_type] prefix) for the calendar entry
     display_name = _strip_meal_prefix(recipe.get("name", ""), meal_type)
 
-    # Add the recipe to the calendar as an all-day event.
-    # end_date must be the day AFTER start_date (iCal exclusive-end convention).
+    await _add_recipe_to_lists(
+        hass, sensor, recipe, display_name, meal_date, calendar, todo_list
+    )
+
+    # Advance to the next free calendar day and continue suggesting.
+    await _advance_to_next_free_day(hass, session_id)
+
+
+async def _add_recipe_to_lists(
+    hass: HomeAssistant,
+    sensor: "GrocySensor",
+    recipe: dict,
+    display_name: str,
+    meal_date: date,
+    calendar: str,
+    todo_list: str,
+) -> None:
+    """Add *recipe* to the calendar for *meal_date* and its ingredients to *todo_list*.
+
+    This is the shared implementation used by both grocy.plan_meal (via _handle_add)
+    and grocy.add_meal.
+    """
     end_date = meal_date + timedelta(days=1)
     try:
         await hass.services.async_call(

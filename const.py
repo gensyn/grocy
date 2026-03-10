@@ -14,8 +14,10 @@ CONF_TODO_LIST = "todo_list"
 CONF_NOTIFY = "notify"
 CONF_BLACKLIST = "blacklist"
 CONF_DATE = "date"
+CONF_RECIPE = "recipe"
 
 SERVICE_PLAN_MEAL = "plan_meal"
+SERVICE_ADD_MEAL = "add_meal"
 
 SERVICE_PLAN_MEAL_SCHEMA = vol.Schema(
     {
@@ -26,6 +28,16 @@ SERVICE_PLAN_MEAL_SCHEMA = vol.Schema(
         vol.Required(CONF_TODO_LIST): cv.entity_id,
         vol.Required(CONF_NOTIFY): str,
         vol.Required(CONF_BLACKLIST): vol.All(int, vol.Range(min=0)),
+    }
+)
+
+SERVICE_ADD_MEAL_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_ENTITY_ID): cv.entity_id,
+        vol.Required(CONF_DATE): cv.date,
+        vol.Required(CONF_RECIPE): str,
+        vol.Required(CONF_CALENDAR): cv.entity_id,
+        vol.Required(CONF_TODO_LIST): cv.entity_id,
     }
 )
 
