@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import uuid
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -124,6 +124,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "calendar": calendar,
             "todo_list": todo_list,
             "notify": notify,
+            "blacklist": blacklist,
+            "all_typed": typed_recipes,
             "available": available,
             "dismissed": set(),
             "unsub": None,
@@ -240,9 +242,13 @@ async def _send_suggestion(hass: HomeAssistant, session_id: str) -> None:
     recipe = session["recipe"]
     meal_type = session["meal_type"]
     notify = session["notify"]
+    meal_date: date = session["meal_date"]
 
     # Strip [meal_type] prefix for display
     display_name = _strip_meal_prefix(recipe.get("name", "Unknown recipe"), meal_type)
+
+    # Format date in a human-readable way (e.g. "10 March 2026")
+    date_str = f"{meal_date.day} {meal_date.strftime('%B %Y')}"
 
     # Accept both "notify.service_name" and plain "service_name" formats
     notify_service = notify.split(".", 1)[-1] if "." in notify else notify
@@ -253,13 +259,13 @@ async def _send_suggestion(hass: HomeAssistant, session_id: str) -> None:
             notify_service,
             {
                 "title": "Meal Suggestion",
-                "message": display_name,
+                "message": f"{display_name} ({date_str})",
                 "data": {
                     "tag": f"grocy_meal_{session_id}",
                     "actions": [
                         {
                             "action": f"GROCY_ADD_{session_id}",
-                            "title": "Add",
+                            "title": "Ok",
                         },
                         {
                             "action": f"GROCY_NEXT_{session_id}",
@@ -294,11 +300,15 @@ async def _handle_notification_action(
 
 
 async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
-    """Accept the suggestion: add recipe to calendar and ingredients to todo list."""
+    """Accept the suggestion: add recipe to calendar and ingredients to todo list.
+
+    After writing, advance the session to the next free calendar day so the
+    user is prompted for consecutive days without having to re-invoke the service.
+    """
     session = hass.data[DOMAIN]["sessions"].get(session_id)
     if not session:
         _LOGGER.warning(
-            "Received 'Add' action but session %s no longer exists", session_id
+            "Received 'Ok' action but session %s no longer exists", session_id
         )
         return
 
@@ -333,6 +343,7 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
         )
 
     # Add each ingredient to the todo list, skipping "Gewürze".
+    # Item format: "{product} {amount} {unit}" (e.g. "Mehl 200 g").
     # If an item for the same product+unit already exists, its amount is summed.
     recipe_id = recipe.get("id")
     if recipe_id is not None:
@@ -379,16 +390,10 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
 
             # Step 3: For each accumulated ingredient, update an existing item
             # when one with the same product+unit is already present; otherwise add.
+            # Item format: "{product} {amount} {unit}" or "{product} {amount}"
             for key in order:
                 product_name, unit_name = key
                 amount = accumulated[key]
-
-                # Build a suffix that uniquely identifies this product+unit combo.
-                # Format: " {unit} {product}" (with unit) or " {product}" (no unit).
-                if unit_name.strip():
-                    item_suffix = f" {unit_name} {product_name}"
-                else:
-                    item_suffix = f" {product_name}"
 
                 # Format the amount for display.
                 amount_str = ""
@@ -398,27 +403,38 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
                     except (ValueError, TypeError):
                         amount_str = str(amount)
 
-                item_name = (
-                    f"{amount_str}{item_suffix}" if amount_str else product_name
-                )
+                # Build the canonical item name.
+                if amount_str and unit_name.strip():
+                    item_name = f"{product_name} {amount_str} {unit_name}"
+                elif amount_str:
+                    item_name = f"{product_name} {amount_str}"
+                else:
+                    item_name = product_name
 
                 # Try to find a matching item in the existing list.
-                # A match requires the item's summary to end with item_suffix AND
-                # the leading part to be parseable as a number (to avoid partial-
-                # word false-positives and items without a numeric amount).
+                # Format is "{product} {amount} {unit}" so we look for an item that
+                # starts with "{product} ", has a parseable float as the next token,
+                # and whose trailing unit matches.
                 matched_summary: str | None = None
                 matched_old_amount: float | None = None
+                product_prefix = f"{product_name} "
                 for existing in existing_items:
                     summary = existing.get("summary", "")
-                    if not summary.endswith(item_suffix):
+                    if not summary.startswith(product_prefix):
                         continue
-                    prefix = summary[: -len(item_suffix)].strip()
+                    rest = summary[len(product_prefix):].strip()
+                    parts = rest.split(None, 1)
+                    if not parts:
+                        continue
                     try:
-                        matched_old_amount = float(prefix)
+                        existing_amount = float(parts[0])
+                    except ValueError:
+                        continue
+                    existing_unit = parts[1].strip() if len(parts) > 1 else ""
+                    if existing_unit == unit_name.strip():
+                        matched_old_amount = existing_amount
                         matched_summary = summary
                         break
-                    except ValueError:
-                        continue  # Prefix not numeric → not a managed item
 
                 if matched_summary is not None and matched_old_amount is not None:
                     # Merge the amounts and update the existing item.
@@ -429,7 +445,10 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
                             if combined.is_integer()
                             else f"{combined:g}"
                         )
-                        new_item_name = f"{combined_str}{item_suffix}"
+                        if unit_name.strip():
+                            new_item_name = f"{product_name} {combined_str} {unit_name}"
+                        else:
+                            new_item_name = f"{product_name} {combined_str}"
                     except (ValueError, TypeError):
                         new_item_name = item_name  # Fallback: use new value as-is
                     await hass.services.async_call(
@@ -459,7 +478,8 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
             "Recipe '%s' has no id field; cannot fetch ingredients", recipe.get("name")
         )
 
-    _cleanup_session(hass, session_id)
+    # Advance to the next free calendar day and continue suggesting.
+    await _advance_to_next_free_day(hass, session_id)
 
 
 async def _handle_next(hass: HomeAssistant, session_id: str) -> None:
@@ -486,6 +506,115 @@ async def _handle_next(hass: HomeAssistant, session_id: str) -> None:
 
     # Pick a new recipe and resend
     session["recipe"] = random.choice(remaining)
+    await _send_suggestion(hass, session_id)
+
+
+async def _find_next_free_date(
+    hass: HomeAssistant,
+    calendar: str,
+    from_date: date,
+    max_days: int = 30,
+) -> date | None:
+    """Return the first date after from_date with no events in the calendar.
+
+    Looks up to max_days days ahead.  Returns None if every candidate date
+    already has at least one event or the calendar query fails.
+    """
+    search_start = datetime.combine(from_date + timedelta(days=1), datetime.min.time())
+    search_end = datetime.combine(
+        from_date + timedelta(days=max_days + 1), datetime.min.time()
+    )
+    try:
+        response = await hass.services.async_call(
+            "calendar",
+            "get_events",
+            {
+                CONF_ENTITY_ID: calendar,
+                "start_date_time": search_start.isoformat(),
+                "end_date_time": search_end.isoformat(),
+            },
+            blocking=True,
+            return_response=True,
+        )
+    except (ServiceValidationError, HomeAssistantError):
+        _LOGGER.exception(
+            "Failed to query calendar '%s' for free dates", calendar
+        )
+        return None
+
+    # Collect the set of dates that are already occupied.
+    busy_dates: set[date] = set()
+    events = (response or {}).get(calendar, {}).get("events", [])
+    for event in events:
+        start_raw = event.get("start", "")
+        try:
+            busy_dates.add(date.fromisoformat(str(start_raw)[:10]))
+        except (ValueError, TypeError):
+            pass
+
+    # Walk forward to find the first free date.
+    candidate = from_date + timedelta(days=1)
+    for _ in range(max_days):
+        if candidate not in busy_dates:
+            return candidate
+        candidate += timedelta(days=1)
+    return None
+
+
+async def _advance_to_next_free_day(hass: HomeAssistant, session_id: str) -> None:
+    """Move the session to the next free calendar date and send a new suggestion.
+
+    Dismissed recipes are reset so that all recipes in the meal type pool are
+    viable again (only the blacklist filter is applied for the new day).
+    If no free date is found within 30 days, the session is cleaned up.
+    """
+    session = hass.data[DOMAIN]["sessions"].get(session_id)
+    if not session:
+        return
+
+    calendar = session["calendar"]
+    meal_date: date = session["meal_date"]
+    meal_type: str = session["meal_type"]
+    blacklist: int = session["blacklist"]
+    all_typed: list[dict] = session["all_typed"]
+
+    next_date = await _find_next_free_date(hass, calendar, meal_date)
+    if next_date is None:
+        _LOGGER.info(
+            "No free calendar date found within 30 days; ending session %s", session_id
+        )
+        _cleanup_session(hass, session_id)
+        return
+
+    # Refresh blacklist relative to today for the new day.
+    blacklisted_names: set[str] = set()
+    if blacklist > 0:
+        try:
+            blacklisted_names = await _get_blacklisted_recipe_names(
+                hass, calendar, blacklist
+            )
+        except (ServiceValidationError, HomeAssistantError) as err:
+            _LOGGER.warning(
+                "Could not fetch calendar events for blacklist check: %s", err
+            )
+
+    available = [
+        r for r in all_typed
+        if _strip_meal_prefix(r.get("name", ""), meal_type) not in blacklisted_names
+    ]
+
+    if not available:
+        _LOGGER.info(
+            "All recipes blacklisted for next date; ending session %s", session_id
+        )
+        _cleanup_session(hass, session_id)
+        return
+
+    # Update the session for the new day: reset dismissed, update date and pool.
+    session["meal_date"] = next_date
+    session["dismissed"] = set()
+    session["available"] = available
+    session["recipe"] = random.choice(available)
     await _send_suggestion(hass, session_id)
 
 
