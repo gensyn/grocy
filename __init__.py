@@ -421,6 +421,9 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
                 matched_old_amount: float | None = None
                 product_name_normalized = product_name.strip().casefold()
                 for existing in existing_items:
+                    # Skip completed items — they should not be merged with.
+                    if existing.get("status") == "completed":
+                        continue
                     summary = existing.get("summary", "")
                     if summary.strip().casefold() != product_name_normalized:
                         continue
