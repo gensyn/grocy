@@ -121,11 +121,11 @@ plan_meal:
     notify:
       name: Notify service
       description: >
-        The notify service (e.g. notify.mobile_app_my_phone) to send the meal
-        suggestion to.
+        The notify service entity to send the meal suggestion to.
       required: true
       selector:
-        text:
+        entity:
+          domain: notify
     blacklist:
       name: Blacklist (days)
       description: >
