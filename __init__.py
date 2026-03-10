@@ -343,7 +343,7 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
         )
 
     # Add each ingredient to the todo list, skipping "Gewürze".
-    # Item format: "{product} {amount} {unit}" (e.g. "Mehl 200 g").
+    # Item name = product name; description = "{amount} {unit}" (e.g. "200 g").
     # If an item for the same product+unit already exists, its amount is summed.
     recipe_id = recipe.get("id")
     if recipe_id is not None:
@@ -389,8 +389,9 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
                 )
 
             # Step 3: For each accumulated ingredient, update an existing item
-            # when one with the same product+unit is already present; otherwise add.
-            # Item format: "{product} {amount} {unit}" or "{product} {amount}"
+            # when one with the same product name is already present; otherwise add.
+            # Item name  = product name (plain)
+            # Description = "{amount} {unit}" or just "{amount}" when there is no unit
             for key in order:
                 product_name, unit_name = key
                 amount = accumulated[key]
@@ -403,41 +404,42 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
                     except (ValueError, TypeError):
                         amount_str = str(amount)
 
-                # Build the canonical item name.
+                # Build the canonical description (amount + unit).
                 if amount_str and unit_name.strip():
-                    item_name = f"{product_name} {amount_str} {unit_name}"
+                    description = f"{amount_str} {unit_name}"
                 elif amount_str:
-                    item_name = f"{product_name} {amount_str}"
+                    description = amount_str
                 else:
-                    item_name = product_name
+                    description = ""
 
                 # Try to find a matching item in the existing list.
-                # Format is "{product} {amount} {unit}" so we look for an item that
-                # starts with "{product} ", has a parseable float as the next token,
-                # and whose trailing unit matches.
+                # A match is an item whose summary equals the product name (after
+                # normalizing whitespace/casing) and whose description is parseable
+                # as "{float} [unit]" with the same unit (to avoid merging across
+                # different units).
                 matched_summary: str | None = None
                 matched_old_amount: float | None = None
-                product_prefix = f"{product_name} "
+                product_name_normalized = product_name.strip().casefold()
                 for existing in existing_items:
                     summary = existing.get("summary", "")
-                    if not summary.startswith(product_prefix):
+                    if summary.strip().casefold() != product_name_normalized:
                         continue
-                    rest = summary[len(product_prefix):].strip()
-                    parts = rest.split(None, 1)
-                    if not parts:
+                    existing_desc = (existing.get("description") or "").strip()
+                    desc_parts = existing_desc.split(None, 1)
+                    if not desc_parts:
                         continue
                     try:
-                        existing_amount = float(parts[0])
+                        existing_amount = float(desc_parts[0])
                     except ValueError:
                         continue
-                    existing_unit = parts[1].strip() if len(parts) > 1 else ""
-                    if existing_unit == unit_name.strip():
+                    existing_unit = desc_parts[1].strip() if len(desc_parts) > 1 else ""
+                    if existing_unit.casefold() == unit_name.strip().casefold():
                         matched_old_amount = existing_amount
                         matched_summary = summary
                         break
 
                 if matched_summary is not None and matched_old_amount is not None:
-                    # Merge the amounts and update the existing item.
+                    # Merge the amounts and update the existing item's description.
                     try:
                         combined = matched_old_amount + float(amount_str)
                         combined_str = (
@@ -446,18 +448,18 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
                             else f"{combined:g}"
                         )
                         if unit_name.strip():
-                            new_item_name = f"{product_name} {combined_str} {unit_name}"
+                            new_description = f"{combined_str} {unit_name}"
                         else:
-                            new_item_name = f"{product_name} {combined_str}"
+                            new_description = combined_str
                     except (ValueError, TypeError):
-                        new_item_name = item_name  # Fallback: use new value as-is
+                        new_description = description  # Fallback: use new value as-is
                     await hass.services.async_call(
                         "todo",
                         "update_item",
                         {
                             CONF_ENTITY_ID: todo_list,
                             "item": matched_summary,
-                            "rename": new_item_name,
+                            "description": new_description,
                         },
                         blocking=True,
                     )
@@ -467,7 +469,8 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
                         "add_item",
                         {
                             CONF_ENTITY_ID: todo_list,
-                            "item": item_name,
+                            "item": product_name,
+                            "description": description,
                         },
                         blocking=True,
                     )
