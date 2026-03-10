@@ -82,7 +82,7 @@
                 },
                 "notify": {
                     "name": "Benachrichtigungsdienst",
-                    "description": "Die Benachrichtigungsdienst-Entität zum Versenden von Mahlzeitenvorschlägen."
+                    "description": "Benachrichtigungsdienst (z. B. notify.mobile_app_mein_handy) zum Versenden von Vorschlägen."
                 },
                 "blacklist": {
                     "name": "Sperrliste (Tage)",

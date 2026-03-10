@@ -82,7 +82,7 @@
                 },
                 "notify": {
                     "name": "Notify service",
-                    "description": "The notify service entity to send the meal suggestion to."
+                    "description": "Notify service (e.g. notify.mobile_app_my_phone) for sending suggestions."
                 },
                 "blacklist": {
                     "name": "Blacklist (days)",
