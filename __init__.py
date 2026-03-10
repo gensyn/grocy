@@ -41,16 +41,17 @@ _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 
-def _strip_meal_prefix(name: str, meal_type: str) -> str:
-    """Strip the leading '[meal_type]' prefix from a recipe name.
+def _strip_meal_tag(name: str, meal_type: str) -> str:
+    """Strip '[meal_type]' from anywhere in a recipe name.
 
-    Any whitespace between the prefix and the recipe name is also removed,
-    so both '[Dinner] Pasta' and '[Dinner]Pasta' return 'Pasta'.
+    The tag may appear as a prefix ('Pasta [Dinner]' → 'Pasta'),
+    a suffix ('[Dinner] Pasta' → 'Pasta'), or in the middle.
+    Surrounding whitespace is collapsed so the result is clean.
     """
-    prefix = f"[{meal_type}]"
-    if name.startswith(prefix):
-        return name[len(prefix):].strip()
-    return name
+    tag = f"[{meal_type}]"
+    stripped = name.replace(tag, "").strip()
+    # Collapse any internal run of whitespace left behind
+    return re.sub(r"\s{2,}", " ", stripped)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -81,10 +82,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_key="grocy_api_error",
             ) from err
 
-        # Filter recipes by meal type prefix "[meal_type]"
-        prefix = f"[{meal_type}]"
+        # Filter recipes whose name contains the meal-type tag "[meal_type]"
+        tag = f"[{meal_type}]"
         typed_recipes = [
-            r for r in all_recipes if r.get("name", "").startswith(prefix)
+            r for r in all_recipes if tag in r.get("name", "")
         ]
 
         if not typed_recipes:
@@ -110,7 +111,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         # Filter out blacklisted recipes (compare using stripped display names)
         available = [
             r for r in typed_recipes
-            if _strip_meal_prefix(r.get("name", ""), meal_type) not in blacklisted_names
+            if _strip_meal_tag(r.get("name", ""), meal_type) not in blacklisted_names
         ]
 
         if not available:
@@ -197,8 +198,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             ) from err
 
         # Find the recipe by name.  Try an exact match first; fall back to a
-        # case-insensitive comparison with the prefix stripped.
-        _prefix_re = re.compile(r"^\[[^\]]*\]\s*")
+        # case-insensitive comparison with all bracket tags stripped.
+        _bracket_re = re.compile(r"\[[^\]]*\]\s*")
         recipe_name_cf = recipe_name.casefold()
         matched_recipe = None
         for r in all_recipes:
@@ -207,9 +208,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 matched_recipe = r
                 break
         if matched_recipe is None:
-            # Try matching against the stripped name (ignores "[meal_type]" prefix)
+            # Try matching against the stripped name (ignores "[meal_type]" tags)
             for r in all_recipes:
-                r_stripped = _prefix_re.sub("", r.get("name", "")).strip()
+                r_stripped = _bracket_re.sub("", r.get("name", "")).strip()
                 if r_stripped.casefold() == recipe_name_cf:
                     matched_recipe = r
                     break
@@ -221,9 +222,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_key="recipe_not_found",
             )
 
-        # Use the stripped display name for calendar entry (remove any prefix).
+        # Use the stripped display name for calendar entry (remove any bracket tags).
         display_name = (
-            _prefix_re.sub("", matched_recipe.get("name", "")).strip()
+            _bracket_re.sub("", matched_recipe.get("name", "")).strip()
             or matched_recipe.get("name", recipe_name)
         )
 
@@ -470,8 +471,8 @@ async def _send_suggestion(hass: HomeAssistant, session_id: str) -> None:
     notify = session["notify"]
     meal_date: date = session["meal_date"]
 
-    # Strip [meal_type] prefix for display
-    display_name = _strip_meal_prefix(recipe.get("name", "Unknown recipe"), meal_type)
+    # Strip [meal_type] tag for display (tag may appear anywhere in the name)
+    display_name = _strip_meal_tag(recipe.get("name", "Unknown recipe"), meal_type)
 
     # Format date in a human-readable way (e.g. "10 March 2026")
     date_str = f"{meal_date.day} {meal_date.strftime('%B %Y')}"
@@ -484,8 +485,8 @@ async def _send_suggestion(hass: HomeAssistant, session_id: str) -> None:
             "notify",
             notify_service,
             {
-                "title": "Meal Suggestion",
-                "message": f"{display_name} ({date_str})",
+                "title": display_name,
+                "message": date_str,
                 "data": {
                     "tag": f"grocy_meal_{session_id}",
                     "actions": [
@@ -546,7 +547,7 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
     sensor: GrocySensor = session["sensor"]
 
     # Use the stripped display name (without [meal_type] prefix) for the calendar entry
-    display_name = _strip_meal_prefix(recipe.get("name", ""), meal_type)
+    display_name = _strip_meal_tag(recipe.get("name", ""), meal_type)
 
     await _add_recipe_to_lists(
         hass, sensor, recipe, display_name, meal_date, calendar, todo_list
@@ -881,7 +882,7 @@ async def _advance_to_next_free_day(hass: HomeAssistant, session_id: str) -> Non
     excluded_names = blacklisted_names | session_assigned
     available = [
         r for r in all_typed
-        if _strip_meal_prefix(r.get("name", ""), meal_type) not in excluded_names
+        if _strip_meal_tag(r.get("name", ""), meal_type) not in excluded_names
     ]
 
     if not available:
