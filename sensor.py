@@ -306,22 +306,25 @@ class GrocySensor(SensorEntity):
         """Return the Grocy QU conversion factor for from_qu → to_qu.
 
         Grocy semantics: 1 unit of from_qu = factor units of to_qu.
-        Product-specific conversions are tried first; generic ones are used as
-        a fallback.  Returns None when no matching conversion is found.
+        Product-specific conversions are tried first; generic ones (product_id
+        IS NULL in the database) are used as a fallback.  The fallback query
+        deliberately filters client-side for null product_id so that
+        product-specific conversions for *other* products are not mistakenly
+        used as a generic reference.  Returns None when no matching conversion
+        is found.
         """
         cache_key = (from_qu_id, to_qu_id, product_id)
         if cache_key in cache:
             return cache[cache_key]
 
-        pids = [product_id, None] if product_id is not None else [None]
-        for pid in pids:
-            query_filters = [f"from_qu_id={from_qu_id}", f"to_qu_id={to_qu_id}"]
-            if pid is not None:
-                query_filters.append(f"product_id={pid}")
+        qu_filter = [f"from_qu_id={from_qu_id}", f"to_qu_id={to_qu_id}"]
+
+        # 1. Product-specific conversion (highest priority)
+        if product_id is not None:
             try:
                 conversions = await self._api_get(
                     "objects/quantity_unit_conversions",
-                    params={"query[]": query_filters},
+                    params={"query[]": qu_filter + [f"product_id={product_id}"]},
                 )
                 if conversions:
                     factor = float(conversions[0].get("factor", 1))
@@ -329,11 +332,31 @@ class GrocySensor(SensorEntity):
                     return factor
             except Exception:  # noqa: BLE001
                 LOGGER.debug(
-                    "Could not fetch QU conversion %s→%s (product %s)",
+                    "Could not fetch product-specific QU conversion %s→%s (product %s)",
                     from_qu_id,
                     to_qu_id,
-                    pid,
+                    product_id,
                 )
+
+        # 2. Generic conversion (product_id IS NULL).
+        # Query without product_id filter, then keep only rows where
+        # product_id is null — entries for other products must be ignored.
+        try:
+            all_convs = await self._api_get(
+                "objects/quantity_unit_conversions",
+                params={"query[]": qu_filter},
+            )
+            generic = [c for c in (all_convs or []) if c.get("product_id") is None]
+            if generic:
+                factor = float(generic[0].get("factor", 1))
+                cache[cache_key] = factor
+                return factor
+        except Exception:  # noqa: BLE001
+            LOGGER.debug(
+                "Could not fetch generic QU conversion %s→%s",
+                from_qu_id,
+                to_qu_id,
+            )
 
         cache[cache_key] = None
         return None
