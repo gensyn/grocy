@@ -134,6 +134,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             "all_typed": typed_recipes,
             "available": available,
             "dismissed": set(),
+            # Track the stripped display names of recipes assigned during this
+            # session so they are not suggested again on subsequent days even
+            # though they were added to future calendar dates (which would not
+            # be captured by the historical blacklist query).
+            "session_assigned": set(),
             "unsub": None,
         }
         hass.data[DOMAIN]["sessions"][session_id] = session
@@ -547,6 +552,11 @@ async def _handle_add(hass: HomeAssistant, session_id: str) -> None:
         hass, sensor, recipe, display_name, meal_date, calendar, todo_list
     )
 
+    # Record this recipe as assigned so it won't be suggested again in this
+    # session, even though its calendar event is in the future and therefore
+    # invisible to the historical blacklist query.
+    session["session_assigned"].add(display_name)
+
     # Advance to the next free calendar day and continue suggesting.
     await _advance_to_next_free_day(hass, session_id)
 
@@ -830,7 +840,8 @@ async def _advance_to_next_free_day(hass: HomeAssistant, session_id: str) -> Non
     """Move the session to the next free calendar date and send a new suggestion.
 
     Dismissed recipes are reset so that all recipes in the meal type pool are
-    viable again (only the blacklist filter is applied for the new day).
+    viable again (only the blacklist filter and the set of recipes already
+    assigned in this session are applied for the new day).
     If no free date is found within 30 days, the session is cleaned up.
     """
     session = hass.data[DOMAIN]["sessions"].get(session_id)
@@ -842,6 +853,7 @@ async def _advance_to_next_free_day(hass: HomeAssistant, session_id: str) -> Non
     meal_type: str = session["meal_type"]
     blacklist: int = session["blacklist"]
     all_typed: list[dict] = session["all_typed"]
+    session_assigned: set[str] = session.get("session_assigned", set())
 
     next_date = await _find_next_free_date(hass, calendar, meal_date)
     if next_date is None:
@@ -863,14 +875,19 @@ async def _advance_to_next_free_day(hass: HomeAssistant, session_id: str) -> Non
                 "Could not fetch calendar events for blacklist check: %s", err
             )
 
+    # Exclude both historically-blacklisted and session-assigned recipes.
+    # Session-assigned recipes were added to future dates in this session and
+    # are therefore not captured by the historical blacklist query.
+    excluded_names = blacklisted_names | session_assigned
     available = [
         r for r in all_typed
-        if _strip_meal_prefix(r.get("name", ""), meal_type) not in blacklisted_names
+        if _strip_meal_prefix(r.get("name", ""), meal_type) not in excluded_names
     ]
 
     if not available:
         _LOGGER.info(
-            "All recipes blacklisted for next date; ending session %s", session_id
+            "All recipes used or blacklisted for next date; ending session %s",
+            session_id,
         )
         _cleanup_session(hass, session_id)
         return
