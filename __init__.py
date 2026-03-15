@@ -121,6 +121,19 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_key="all_recipes_blacklisted",
             )
 
+        # Find the first free calendar day at or after the requested date so
+        # that the very first suggestion is already for a day without an entry.
+        first_free = await _find_next_free_date(
+            hass, calendar, meal_date, inclusive=True
+        )
+        if first_free is None:
+            raise ServiceValidationError(
+                "No free calendar date found within the search period.",
+                translation_domain=DOMAIN,
+                translation_key="no_free_date",
+            )
+        meal_date = first_free
+
         # Create a planning session to track state across notification responses
         session_id = uuid.uuid4().hex[:8]
         session: dict[str, Any] = {
@@ -790,15 +803,23 @@ async def _find_next_free_date(
     calendar: str,
     from_date: date,
     max_days: int = 30,
+    inclusive: bool = False,
 ) -> date | None:
-    """Return the first date after from_date with no events in the calendar.
+    """Return the first free date in the calendar relative to from_date.
+
+    When *inclusive* is False (default) the search starts the day after
+    from_date (useful after "Ok" to find the next day to plan).
+    When *inclusive* is True the search starts on from_date itself (useful
+    for the initial call so that we plan the first actually free day at-or-after
+    the user-supplied start date).
 
     Looks up to max_days days ahead.  Returns None if every candidate date
     already has at least one event or the calendar query fails.
     """
-    search_start = datetime.combine(from_date + timedelta(days=1), datetime.min.time())
+    start_offset = 0 if inclusive else 1
+    search_start = datetime.combine(from_date + timedelta(days=start_offset), datetime.min.time())
     search_end = datetime.combine(
-        from_date + timedelta(days=max_days + 1), datetime.min.time()
+        from_date + timedelta(days=max_days + start_offset), datetime.min.time()
     )
     try:
         response = await hass.services.async_call(
@@ -829,7 +850,7 @@ async def _find_next_free_date(
             pass
 
     # Walk forward to find the first free date.
-    candidate = from_date + timedelta(days=1)
+    candidate = from_date + timedelta(days=start_offset)
     for _ in range(max_days):
         if candidate not in busy_dates:
             return candidate
