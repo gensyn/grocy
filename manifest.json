@@ -1,0 +1,18 @@
+{
+  "domain": "grocy",
+  "name": "Grocy",
+  "codeowners": [
+    "@gensyn"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/gensyn/grocy",
+  "homekit": {},
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/gensyn/grocy/issues",
+  "quality_scale": "bronze",
+  "requirements": [],
+  "ssdp": [],
+  "version": "0.0.0",
+  "zeroconf": []
+}
